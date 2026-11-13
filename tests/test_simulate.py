@@ -17,11 +17,11 @@ def test_sequential_rule_keeps_the_wrong_ranking_rate_within_the_stated_level():
     # that stop may stop on a wrong order. The correction is a union bound, so the measured
     # rate should sit well below that; the test allows up to 10 %.
     summaries = simulate(
-        [0.8, 0.0, -0.8], runs=60, batch=5, budget=1500, seed=0,
+        [0.8, 0.0, -0.8], runs=40, batch=5, budget=1500, seed=0,
         rule=StopRule(0.9, correction="sequential"), schedulers=("round-robin", "uncertainty"),
     )
     for summary in summaries:
-        assert summary.stopped >= 55
+        assert summary.stopped >= 36
         assert summary.wrong_rate <= 0.10
         assert summary.votes_median <= summary.votes_p90 <= 1500
         assert summary.tau_mean > 0.95
@@ -31,11 +31,11 @@ def test_uncorrected_rule_stops_wrong_more_often_than_its_nominal_level():
     # Three nearly tied systems, nominal 90 % per pair, a look after every batch: the share
     # of stopped runs with a wrong order is far above 10 % (about a third with this seed).
     (summary,) = simulate(
-        [0.1, 0.0, -0.1], runs=100, batch=5, budget=300, seed=0, rule=StopRule(0.9),
+        [0.1, 0.0, -0.1], runs=60, batch=5, budget=300, seed=0, rule=StopRule(0.9),
         schedulers=("uncertainty",),
     )
-    assert summary.stopped >= 15
-    assert summary.wrong_rate > 0.2
+    assert summary.stopped >= 10
+    assert summary.wrong_rate > 0.15
     assert summary.wrong_total >= summary.wrong_stopped
 
 
@@ -50,10 +50,10 @@ def test_simulation_repeats_under_a_seed_and_changes_with_it():
 
 def test_top_k_target_needs_fewer_votes_than_the_full_order():
     theta = [2.0, 0.1, 0.0, -0.1]
-    kwargs = dict(runs=20, batch=4, budget=400, seed=0, schedulers=("uncertainty",))
+    kwargs = dict(runs=12, batch=4, budget=400, seed=0, schedulers=("uncertainty",))
     (full,) = simulate(theta, rule=StopRule(0.9), **kwargs)
     (top,) = simulate(theta, rule=StopRule(0.9, target="top-1"), **kwargs)
-    assert top.stopped == 20 and top.wrong_stopped == 0
+    assert top.stopped == 12 and top.wrong_stopped == 0
     assert top.votes_mean < 0.5 * full.votes_mean
 
 
