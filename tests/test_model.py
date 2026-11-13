@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from scipy.optimize import minimize
 
-from pairplan.model import FitError, fit, information, outcome_probs
+from pairplan.model import FitError, fit, information, mle_obstacle, outcome_probs
 from pairplan.votes import Counts
 
 
@@ -175,3 +175,111 @@ def test_warm_start_gives_same_answer():
 def test_negative_ridge_rejected():
     with pytest.raises(ValueError):
         fit(Counts.empty(["x", "y"]), ridge=-1.0)
+
+
+def counts_from(names, wins=(), ties=()):
+    counts = Counts.empty(names)
+    index = {name: k for k, name in enumerate(names)}
+    for winner, loser, k in wins:
+        counts.add(index[winner], index[loser], "a", k)
+    for one, other, k in ties:
+        counts.add(index[one], index[other], "tie", k)
+    return counts
+
+
+def test_unbeaten_system_has_no_mle_and_is_named():
+    counts = counts_from("xyz", wins=[("x", "y", 5), ("x", "z", 5), ("y", "z", 3), ("z", "y", 2)])
+    assert "'x' never lost or tied" in mle_obstacle(counts)
+    with pytest.raises(FitError, match="'x' never lost or tied a vote"):
+        fit(counts, ridge=0.0)
+
+
+def test_winless_system_has_no_mle_and_is_named():
+    counts = counts_from("xyz", wins=[("x", "z", 4), ("y", "z", 4), ("x", "y", 3), ("y", "x", 2)])
+    with pytest.raises(FitError, match="'z' never won or tied a vote"):
+        fit(counts, ridge=0.0)
+
+
+def test_group_that_never_lost_to_the_rest_has_no_mle_and_is_named():
+    # a and b beat each other, c and d beat each other, and the first group always beats the
+    # second: every system has wins and losses, but the groups cannot be placed.
+    wins = [("a", "b", 3), ("b", "a", 2), ("c", "d", 2), ("d", "c", 4), ("a", "c", 5),
+            ("b", "d", 1)]
+    counts = counts_from("abcd", wins=wins)
+    with pytest.raises(FitError, match="the group 'a', 'b' never lost to or tied with"):
+        fit(counts, ridge=0.0)
+    # One win back from the lower group connects the graph and the fit exists.
+    counts.add(3, 0, "a")
+    assert mle_obstacle(counts) is None
+    result = fit(counts, ridge=0.0)
+    assert result.converged and np.all(np.isfinite(result.theta))
+
+
+def test_unseen_and_unconnected_systems_have_no_mle():
+    counts = counts_from("xyz", wins=[("x", "y", 2), ("y", "x", 2)])
+    with pytest.raises(FitError, match="'z' has no votes"):
+        fit(counts, ridge=0.0)
+    wins = [("a", "b", 2), ("b", "a", 2), ("c", "d", 2), ("d", "c", 2)]
+    with pytest.raises(FitError, match="never lost to or tied with a system outside it"):
+        fit(counts_from("abcd", wins=wins), ridge=0.0)
+
+
+def test_connected_case_fits_at_ridge_zero():
+    wins = [("x", "y", 6), ("y", "x", 2), ("y", "z", 5), ("z", "y", 3), ("z", "x", 1),
+            ("x", "z", 7)]
+    counts = counts_from("xyz", wins=wins, ties=[("x", "y", 2), ("y", "z", 1)])
+    assert mle_obstacle(counts) is None
+    result = fit(counts, ridge=0.0)
+    assert result.converged
+    assert result.ranking == ["x", "y", "z"]
+    assert result.theta.sum() == pytest.approx(0.0, abs=1e-10)
+    assert 0.0 < result.nu < 5.0
+
+
+def test_a_tie_connects_the_graph_when_a_cycle_has_more_wins_than_ties():
+    # x beat y, y beat z, z tied x: the cycle x -> y -> z -> x has two wins and one tie.
+    counts = counts_from("xyz", wins=[("x", "y", 1), ("y", "z", 1)], ties=[("z", "x", 1)])
+    assert mle_obstacle(counts) is None
+    result = fit(counts, ridge=0.0)
+    assert result.converged and np.all(np.abs(result.theta) < 20)
+    # A system that only ever tied is placed by its ties once wins go both ways elsewhere.
+    counts = counts_from("xyz", wins=[("x", "y", 3), ("y", "x", 2)], ties=[("x", "z", 4)])
+    assert mle_obstacle(counts) is None
+    assert fit(counts, ridge=0.0).converged
+
+
+def test_tie_parameter_unbounded_cases_have_no_mle():
+    # One system beat and tied the other but never lost: fitted frequencies would need a
+    # zero win probability for the loser and an infinite tie parameter.
+    counts = counts_from("xy", wins=[("x", "y", 3)], ties=[("x", "y", 2)])
+    with pytest.raises(FitError, match="tie parameter is unbounded"):
+        fit(counts, ridge=0.0)
+    only_ties = counts_from("xyz", ties=[("x", "y", 2), ("y", "z", 2), ("x", "z", 1)])
+    with pytest.raises(FitError, match="tie parameter is unbounded"):
+        fit(only_ties, ridge=0.0)
+    assert np.all(np.isfinite(fit(only_ties, ridge=0.01).theta))
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_structural_check_agrees_with_what_the_likelihood_does(seed):
+    # Sparse random results on four systems. Where the check says the estimate exists the
+    # fit converges to moderate values; where it says it does not, a weakly penalised fit
+    # runs off: some strength or the tie parameter becomes large.
+    rng = np.random.default_rng(seed)
+    counts = Counts.empty(["a", "b", "c", "d"])
+    for _ in range(7):
+        i, j = (int(x) for x in rng.choice(4, size=2, replace=False))
+        counts.add(i, j, str(rng.choice(["a", "b", "tie"], p=[0.4, 0.3, 0.3])))
+    obstacle = mle_obstacle(counts)
+    if obstacle is None:
+        result = fit(counts, ridge=0.0)
+        assert result.converged
+        assert np.abs(result.theta).max() < 15 and abs(result.log_nu or 0.0) < 15
+    else:
+        with pytest.raises(FitError):
+            fit(counts, ridge=0.0)
+        if "has no votes" in obstacle:
+            return  # that strength is undetermined rather than infinite
+        loose = fit(counts, ridge=1e-7)
+        spread = np.abs(loose.theta).max()
+        assert spread > 4 or abs(loose.log_nu or 0.0) > 4

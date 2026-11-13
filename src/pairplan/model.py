@@ -91,6 +91,80 @@ def information(
     return info
 
 
+def _names(systems: tuple[str, ...], members: np.ndarray) -> str:
+    listed = [repr(systems[k]) for k in np.flatnonzero(members)]
+    return listed[0] if len(listed) == 1 else "the group " + ", ".join(listed)
+
+
+def mle_obstacle(counts: Counts) -> str | None:
+    """Why the plain maximum-likelihood estimate does not exist, or ``None`` if it does.
+
+    Decided from the pattern of results, not from the numbers. Draw an arrow from ``i`` to
+    ``j`` when ``i`` has beaten ``j`` at least once, and arrows both ways when they have tied.
+
+    - The strengths are finite only if this graph is strongly connected (Ford's condition): a
+      system, or a group of systems, that never lost to or tied with anyone outside it can
+      be pushed to infinity without lowering the likelihood, and likewise one that never won.
+    - With ties in the data the tie parameter is estimated too, and it is finite only if in
+      addition some closed walk along the arrows uses more wins than ties. Otherwise the
+      likelihood keeps growing as ties become ever more likely and the winners ever
+      stronger; the smallest case is two systems where one has beaten and tied the other but
+      never lost.
+
+    A system without any votes is reported first: its strength is undetermined.
+    """
+    m = counts.m
+    beat = counts.wins > 0
+    tied = counts.ties > 0
+    edge = beat | tied
+    np.fill_diagonal(edge, False)
+    reach = edge | np.eye(m, dtype=bool)
+    for k in range(m):
+        reach |= reach[:, k : k + 1] & reach[k : k + 1, :]
+    if not reach.all():
+        totals = counts.pair_totals.sum(axis=1)
+        if (totals == 0).any():
+            return (
+                f"{_names(counts.systems, totals == 0)} has no votes, so its strength is not "
+                "determined"
+            )
+        same = reach & reach.T
+        groups = {tuple(np.flatnonzero(row)) for row in same}
+        sources = []
+        sinks = []
+        for group in sorted(groups):
+            inside = np.zeros(m, dtype=bool)
+            inside[list(group)] = True
+            if not edge[np.ix_(~inside, inside)].any():
+                sources.append(inside)
+            if not edge[np.ix_(inside, ~inside)].any():
+                sinks.append(inside)
+        for inside in sources:
+            if inside.sum() == 1:
+                return f"{_names(counts.systems, inside)} never lost or tied a vote"
+        for inside in sinks:
+            if inside.sum() == 1:
+                return f"{_names(counts.systems, inside)} never won or tied a vote"
+        return (
+            f"{_names(counts.systems, sources[0])} never lost to or tied with a system outside it"
+        )
+    if tied.any():
+        # Difference constraints d_j <= d_i - 1 for "i beat j" and |d_i - d_j| <= 1 for a tie
+        # are solvable exactly when no closed walk has more wins than ties (no negative
+        # cycle); a solution is a direction along which the likelihood never decreases.
+        weight = np.where(beat, -1.0, np.where(tied, 1.0, np.inf))
+        np.fill_diagonal(weight, np.inf)
+        dist = np.zeros(m)
+        for _ in range(m):
+            dist = np.minimum(dist, (dist[:, None] + weight).min(axis=0))
+        if not ((dist[:, None] + weight).min(axis=0) < dist - 1e-9).any():
+            return (
+                "the tie parameter is unbounded: no cycle of results has more wins than ties "
+                "(for example one system beat and tied another but never lost to it)"
+            )
+    return None
+
+
 def _loglik(counts: Counts, theta: np.ndarray, log_nu: float | None, ridge: float) -> float:
     win, tie = outcome_probs(theta, log_nu)
     mask = counts.wins > 0
@@ -207,11 +281,18 @@ def fit(
     i.e. a weak Gaussian prior with standard deviation ``ridge ** -0.5`` that keeps the
     estimate finite when a system has won or lost every vote or the comparison graph is not
     connected. ``ridge=0`` gives the plain maximum-likelihood estimate and raises
-    :class:`FitError` when it does not exist. When the data contain no ties, ``nu`` is fixed at
-    zero (the Bradley-Terry model) and not estimated.
+    :class:`FitError` when it does not exist, which is decided from the pattern of results
+    before fitting (see :func:`mle_obstacle`). When the data contain no ties, ``nu`` is fixed
+    at zero (the Bradley-Terry model) and not estimated.
     """
     if ridge < 0:
         raise ValueError("ridge must be >= 0")
+    if ridge == 0:
+        obstacle = mle_obstacle(counts)
+        if obstacle is not None:
+            raise FitError(
+                f"no finite maximum-likelihood estimate: {obstacle}; use ridge > 0"
+            )
     m = counts.m
     weights = counts.pair_totals.astype(float)
     wins = counts.wins.astype(float)
@@ -267,8 +348,8 @@ def fit(
 
     if not converged and ridge == 0:
         raise FitError(
-            "no finite maximum-likelihood estimate: some system has won or lost every vote, "
-            "or the comparison graph is not connected; use ridge > 0"
+            "the maximum-likelihood fit did not converge although the pattern of results "
+            "allows a finite estimate; use ridge > 0"
         )
     info = information(theta, log_nu, weights)
     try:
