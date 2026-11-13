@@ -32,6 +32,14 @@ def normal_cdf(x: float) -> float:
     return 0.5 * math.erfc(-x / math.sqrt(2.0))
 
 
+_erfc = np.frompyfunc(math.erfc, 1, 1)
+
+
+def normal_sf(z: np.ndarray) -> np.ndarray:
+    """Upper tail of the standard normal, elementwise (numpy has no erfc of its own)."""
+    return 0.5 * _erfc(np.asarray(z, dtype=float) / math.sqrt(2.0)).astype(float)
+
+
 def outcome_probs(theta: np.ndarray, log_nu: float | None) -> tuple[np.ndarray, np.ndarray]:
     """Matrices ``win[i, j] = P(i beats j)`` and ``tie[i, j] = P(tie between i and j)``.
 
